@@ -227,18 +227,15 @@ func checkForInvalidCredentials(uri string, err error) {
 		return
 	}
 
-	if webSyncErr, ok := err.(*utils.WebSyncError); ok {
-		aviError, ok := webSyncErr.GetWebAPIError().(session.AviError)
-		if ok && aviError.HttpStatusCode == 401 {
-			if strings.Contains(*aviError.Message, "Invalid credentials") {
-				if utils.IsVCFCluster() {
-					WaitForInitSecretRecreateAndReboot()
-					return
-				}
-
-				utils.AviLog.Errorf("msg: Invalid credentials error for API request: %s, Shutting down API Server", uri)
-				ShutdownApi()
+	if aviError, ok := err.(session.AviError); ok && aviError.HttpStatusCode == 401 {
+		if strings.Contains(*aviError.Message, "Invalid credentials") {
+			if utils.IsVCFCluster() {
+				WaitForInitSecretRecreateAndReboot()
+				return
 			}
+
+			utils.AviLog.Errorf("msg: Invalid credentials error for API request: %s, Shutting down API Server", uri)
+			ShutdownApi()
 		}
 	}
 }

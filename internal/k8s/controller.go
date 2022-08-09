@@ -802,6 +802,11 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 			}
 			oldobj := old.(*corev1.Secret)
 			secret := cur.(*corev1.Secret)
+			utils.AviLog.Debugf("%+v", oldobj)
+			utils.AviLog.Debugf("%+v", secret)
+			utils.AviLog.Warnf("oldResourceVersion: %s, newResourceVersion: %s", oldobj.ResourceVersion, secret.ResourceVersion)
+			utils.AviLog.Warnf("Old Secret Data: %+v", oldobj.Data)
+			utils.AviLog.Warnf("New Secret Data: %+v", secret.Data)
 			if oldobj.ResourceVersion != secret.ResourceVersion && !reflect.DeepEqual(secret.Data, oldobj.Data) {
 				if checkAviSecretUpdateAndShutdown(secret) {
 					// Only add the key if the resource versions have changed.

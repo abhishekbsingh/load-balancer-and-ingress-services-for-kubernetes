@@ -1601,19 +1601,26 @@ func RefreshAuthToken(kc kubernetes.Interface) {
 		return
 	}
 	token := newTokenResp.(map[string]interface{})["token"].(string)
-	aviSecret, err := GetAviSecretWithRetry(kc, retryCount)
-	if err != nil {
-		utils.AviLog.Errorf("Failed to get secret, err: %+v", err)
-		return
-	}
-	aviSecret.Data["authtoken"] = []byte(token)
+	if utils.IsVCFCluster() {
+		tokenCtrlProp := map[string]string{
+			utils.ENV_CTRL_AUTHTOKEN: token,
+		}
+		utils.SharedCtrlProp().PopulateCtrlProp(tokenCtrlProp)
+	} else {
+		aviSecret, err := GetAviSecretWithRetry(kc, retryCount)
+		if err != nil {
+			utils.AviLog.Errorf("Failed to get secret, err: %+v", err)
+			return
+		}
+		aviSecret.Data["authtoken"] = []byte(token)
 
-	err = UpdateAviSecretWithRetry(kc, aviSecret, retryCount)
-	if err != nil {
-		utils.AviLog.Errorf("Failed to update secret, err: %+v", err)
-		return
+		err = UpdateAviSecretWithRetry(kc, aviSecret, retryCount)
+		if err != nil {
+			utils.AviLog.Errorf("Failed to update secret, err: %+v", err)
+			return
+		}
 	}
-	utils.AviLog.Infof("Successfully updated authtoken")
+	utils.AviLog.Infof("Successfully updated %s with authtoken, %s", AviSecret, token)
 	if oldTokenID != "" {
 		err = utils.DeleteAuthTokenWithRetry(aviClient, oldTokenID, retryCount)
 		if err != nil {
