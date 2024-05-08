@@ -172,13 +172,14 @@ func (t *T1LRNetworking) createInfraSettingAndAnnotateNS(nsLRMap map[string]stri
 
 		wg.Add(1)
 		go func(lr, ns string) {
+			defer wg.Done()
 			_, err := lib.CreateOrUpdateAviInfraSetting(infraSettingName, netName, lr, "")
 			if err != nil {
 				utils.AviLog.Errorf("failed to create aviInfraSetting, name: %s, error: %s", infraSettingName, err.Error())
 				return
 			}
+			utils.AviLog.Infof("Created AviInfraSetting: %s", infraSettingName)
 			lib.AnnotateNamespaceWithInfraSetting(ns, infraSettingName)
-			wg.Done()
 		}(lr, ns)
 	}
 
@@ -192,8 +193,12 @@ func (t *T1LRNetworking) createInfraSettingAndAnnotateNS(nsLRMap map[string]stri
 			wg.Done()
 		}(infraSettingName)
 	}
+	wg.Add(1)
+	go func() {
+		lib.RemoveInfraSettingAnnotationFromNamespaces(staleInfraSettingCRSet)
+		wg.Done()
+	}()
 	wg.Wait()
-	lib.RemoveInfraSettingAnnotationFromNamespaces(staleInfraSettingCRSet)
 }
 
 func (t *T1LRNetworking) matchCidrInNetwork(subnets []*models.Subnet, cidrs map[string]struct{}) bool {
