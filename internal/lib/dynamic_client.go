@@ -82,7 +82,7 @@ var (
 	}
 
 	VPCNetworkConfigurationGVR = schema.GroupVersionResource{
-		Group:    "nsx.vmware.com",
+		Group:    "crd.nsx.vmware.com",
 		Version:  "v1alpha1",
 		Resource: "vpcnetworkconfigurations",
 	}
