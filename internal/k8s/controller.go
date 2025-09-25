@@ -1134,6 +1134,17 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 				return
 			}
 			secret := obj.(*corev1.Secret)
+
+			// Handle avi-secret add event by reloading controller properties
+			if secret.Namespace == utils.GetAKONamespace() && secret.Name == lib.AviSecret {
+				utils.AviLog.Infof("Avi Secret object %s/%s added, reloading controller properties", secret.Namespace, secret.Name)
+				if err := PopulateControllerProperties(utils.GetInformers().ClientSet); err != nil {
+					utils.AviLog.Errorf("Failed to reload controller properties after secret add: %v", err)
+				} else {
+					utils.AviLog.Infof("Successfully reloaded controller properties from added secret")
+				}
+			}
+
 			namespace, _, _ := cache.SplitMetaNamespaceKey(utils.ObjKey(secret))
 			key := "Secret" + "/" + utils.ObjKey(secret)
 			if lib.IsIstioEnabled() && secret.Namespace == utils.GetAKONamespace() && secret.Name == lib.IstioSecret {
@@ -1169,7 +1180,7 @@ func (c *AviController) SetupEventHandlers(k8sinfo K8sinformers) {
 					return
 				}
 			}
-			if checkAviSecretUpdateAndShutdown(secret) {
+			if checkAviSecretDeleteAndShutdown(secret) {
 				namespace, _, _ := cache.SplitMetaNamespaceKey(utils.ObjKey(secret))
 				key := "Secret" + "/" + utils.ObjKey(secret)
 				if lib.IsNamespaceBlocked(namespace) {
@@ -1543,8 +1554,24 @@ func validateAviConfigMap(obj interface{}) (*corev1.ConfigMap, bool) {
 
 func checkAviSecretUpdateAndShutdown(secret *corev1.Secret) bool {
 	if secret.Namespace == utils.GetAKONamespace() && secret.Name == lib.AviSecret {
-		// if the secret is updated or deleted we shutdown API server
-		utils.AviLog.Warnf("Avi Secret object %s/%s updated/deleted, shutting down AKO", secret.Namespace, secret.Name)
+		// if the secret is updated, reload controller properties instead of shutting down
+		utils.AviLog.Infof("Avi Secret object %s/%s updated, reloading controller properties", secret.Namespace, secret.Name)
+		if err := PopulateControllerProperties(utils.GetInformers().ClientSet); err != nil {
+			utils.AviLog.Errorf("Failed to reload controller properties after secret update: %v", err)
+			// If reload fails, we still shutdown as fallback
+			lib.ShutdownApi()
+			return false
+		}
+		utils.AviLog.Infof("Successfully reloaded controller properties from updated secret")
+		return false // Don't process this secret further in the workqueue
+	}
+	return true
+}
+
+func checkAviSecretDeleteAndShutdown(secret *corev1.Secret) bool {
+	if secret.Namespace == utils.GetAKONamespace() && secret.Name == lib.AviSecret {
+		// if the secret is deleted we shutdown API server
+		utils.AviLog.Warnf("Avi Secret object %s/%s deleted, shutting down AKO", secret.Namespace, secret.Name)
 		lib.ShutdownApi()
 		return false
 	}

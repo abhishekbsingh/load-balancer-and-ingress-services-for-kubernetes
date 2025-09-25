@@ -531,6 +531,22 @@ func setTranzportZone(tzPath string) {
 
 func (c *VCFK8sController) AddSecretEventHandler(stopCh <-chan struct{}) {
 	secretEventHandler := cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			if c.DisableSync {
+				return
+			}
+			secret := obj.(*corev1.Secret)
+
+			// Handle avi-secret add event by reloading controller properties
+			if secret.Namespace == utils.GetAKONamespace() && secret.Name == lib.AviSecret {
+				utils.AviLog.Infof("Avi Secret object %s/%s added, reloading controller properties", secret.Namespace, secret.Name)
+				if err := PopulateControllerProperties(utils.GetInformers().ClientSet); err != nil {
+					utils.AviLog.Errorf("Failed to reload controller properties after secret add: %v", err)
+				} else {
+					utils.AviLog.Infof("Successfully reloaded controller properties from added secret")
+				}
+			}
+		},
 		DeleteFunc: func(obj interface{}) {
 			secret, ok := obj.(*corev1.Secret)
 			if !ok {
@@ -546,7 +562,7 @@ func (c *VCFK8sController) AddSecretEventHandler(stopCh <-chan struct{}) {
 				}
 			}
 			if secret.Namespace == utils.GetAKONamespace() && secret.Name == lib.AviSecret {
-				utils.AviLog.Fatalf("Avi Secret object %s/%s updated/deleted, shutting down AKO", secret.Namespace, secret.Name)
+				utils.AviLog.Warnf("Avi Secret object %s/%s deleted", secret.Namespace, secret.Name)
 			}
 		},
 		UpdateFunc: func(old, cur interface{}) {
@@ -554,7 +570,14 @@ func (c *VCFK8sController) AddSecretEventHandler(stopCh <-chan struct{}) {
 			secret := cur.(*corev1.Secret)
 			if oldobj.ResourceVersion != secret.ResourceVersion && !reflect.DeepEqual(secret.Data, oldobj.Data) {
 				if secret.Namespace == utils.GetAKONamespace() && secret.Name == lib.AviSecret {
-					utils.AviLog.Fatalf("Avi Secret object %s/%s updated/deleted, shutting down AKO", secret.Namespace, secret.Name)
+					// if the secret is updated, reload controller properties instead of shutting down
+					utils.AviLog.Infof("Avi Secret object %s/%s updated, reloading controller properties", secret.Namespace, secret.Name)
+					if err := PopulateControllerProperties(c.informers.ClientSet); err != nil {
+						utils.AviLog.Errorf("Failed to reload controller properties after secret update: %v", err)
+						// If reload fails, we still shutdown as fallback
+						utils.AviLog.Fatalf("Avi Secret object %s/%s updated but failed to reload properties, shutting down AKO", secret.Namespace, secret.Name)
+					}
+					utils.AviLog.Infof("Successfully reloaded controller properties from updated secret")
 				}
 			}
 		},
