@@ -533,6 +533,7 @@ func (o *AviObjectGraph) BuildPGPoolForDedicatedMode(key string, vsNode *nodes.A
 			PortName:   akogatewayapilib.FindPortName(backend.Name, backend.Namespace, backend.Port, key),
 			TargetPort: akogatewayapilib.FindTargetPort(backend.Name, backend.Namespace, backend.Port, key),
 			ServiceMetadata: lib.ServiceMetadataObj{
+				HTTPRoute:            routeModel.GetNamespace() + "/" + routeModel.GetName(),
 				NamespaceServiceName: []string{backend.Namespace + "/" + backend.Name},
 			},
 		}

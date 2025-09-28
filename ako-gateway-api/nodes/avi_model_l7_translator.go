@@ -121,9 +121,15 @@ func (o *AviObjectGraph) BuildChildVS(key string, routeModel RouteModel, parentN
 	childNode.Tenant = parentNode[0].Tenant
 	childNode.EVHParent = false
 
+	ruleName := utils.Stringify(utils.Hash(utils.Stringify(rule.Matches)))
+	if rule.Name != "" {
+		ruleName = rule.Name
+	}
+
 	childNode.ServiceMetadata = lib.ServiceMetadataObj{
-		Gateway:   parentNsName,
-		HTTPRoute: routeModel.GetNamespace() + "/" + routeModel.GetName(),
+		Gateway:           parentNsName,
+		HTTPRoute:         routeModel.GetNamespace() + "/" + routeModel.GetName(),
+		HTTPRouteRuleName: ruleName,
 	}
 	childNode.ApplicationProfileRef = proto.String(fmt.Sprintf("/api/applicationprofile/?name=%s", utils.DEFAULT_L7_APP_PROFILE))
 	childNode.ServiceEngineGroup = lib.GetSEGName()
@@ -424,6 +430,7 @@ func (o *AviObjectGraph) BuildPGPool(key, parentNsName string, childVsNode *node
 			o.RemovePoolRefsFromPG(poolName, o.GetPoolGroupByName(PGName))
 			continue
 		}
+
 		poolNode := &nodes.AviPoolNode{
 			Name:       poolName,
 			Tenant:     childVsNode.Tenant,
@@ -432,6 +439,7 @@ func (o *AviObjectGraph) BuildPGPool(key, parentNsName string, childVsNode *node
 			TargetPort: akogatewayapilib.FindTargetPort(httpbackend.Backend.Name, httpbackend.Backend.Namespace, httpbackend.Backend.Port, key),
 			Port:       httpbackend.Backend.Port,
 			ServiceMetadata: lib.ServiceMetadataObj{
+				HTTPRoute:            routeModel.GetNamespace() + "/" + routeModel.GetName(),
 				NamespaceServiceName: []string{httpbackend.Backend.Namespace + "/" + httpbackend.Backend.Name},
 			},
 			VrfContext: lib.GetVrf(),

@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 
@@ -140,7 +141,10 @@ func (o *gateway) Delete(key string, option status.StatusOptions) {
 	o.UpdateStatus(key, gw, &status.Status{GatewayStatus: gatewayStatus})
 	utils.AviLog.Infof("key: %s, msg: Successfully reset the address status of gateway: %s", key, gw.Name)
 
-	// TODO: Add annotation delete code here
+	// Remove gateway annotations
+	if err := o.patchGatewayAnnotationsDelete(key, gw); err != nil {
+		utils.AviLog.Errorf("key: %s, msg: failed to remove gateway annotations: %v", key, err)
+	}
 }
 
 func (o *gateway) Update(key string, option status.StatusOptions) {
@@ -212,7 +216,12 @@ func (o *gateway) Update(key string, option status.StatusOptions) {
 	}
 	o.Patch(key, gw, &status.Status{GatewayStatus: gatewaystatus})
 
-	// TODO: Annotation update code here
+	// Update gateway annotations using patch
+	if option.Options.VirtualServiceUUID != "" {
+		if err := o.patchGatewayAnnotations(key, gw, option.Options.VirtualServiceUUID); err != nil {
+			utils.AviLog.Errorf("key: %s, msg: failed to update gateway annotations: %v", key, err)
+		}
+	}
 }
 
 func (o *gateway) BulkUpdate(key string, options []status.StatusOptions) {
@@ -326,4 +335,94 @@ func (o *gateway) isStatusEqual(old, new *gatewayv1.GatewayStatus) bool {
 		}
 	}
 	return reflect.DeepEqual(oldStatus, newStatus)
+}
+
+func (o *gateway) patchGatewayAnnotations(key string, gw *gatewayv1.Gateway, virtualServiceUUID string, retryNum ...int) error {
+	retry := 0
+	if len(retryNum) > 0 {
+		retry = retryNum[0]
+		if retry >= 3 {
+			return errors.New("patchGatewayAnnotations retried 3 times, aborting")
+		}
+	}
+
+	annotations := gw.Annotations
+	if annotations == nil {
+		annotations = make(map[string]string)
+	}
+	annotations[lib.GatewayVSAnnotation] = virtualServiceUUID
+
+	patchPayload := map[string]interface{}{
+		"metadata": map[string]map[string]string{
+			"annotations": annotations,
+		},
+	}
+
+	patchPayloadBytes, err := json.Marshal(patchPayload)
+	if err != nil {
+		return fmt.Errorf("error marshalling gateway annotation patch payload: %v", err)
+	}
+
+	_, err = akogatewayapilib.AKOControlConfig().GatewayAPIClientset().GatewayV1().Gateways(gw.Namespace).Patch(context.TODO(), gw.Name, types.MergePatchType, patchPayloadBytes, metav1.PatchOptions{})
+	if err != nil {
+		utils.AviLog.Warnf("key: %s, msg: error updating gateway annotations, retry: %d, err: %v", key, retry, err)
+		// Fetch updated gateway and retry
+		updatedGW, fetchErr := akogatewayapilib.AKOControlConfig().GatewayApiInformers().GatewayInformer.Lister().Gateways(gw.Namespace).Get(gw.Name)
+		if fetchErr != nil {
+			return fmt.Errorf("failed to fetch updated gateway: %v", fetchErr)
+		}
+		return o.patchGatewayAnnotations(key, updatedGW, virtualServiceUUID, retry+1)
+	}
+
+	utils.AviLog.Infof("key: %s, msg: Successfully updated gateway %s/%s annotations with VS UUID: %s", key, gw.Namespace, gw.Name, virtualServiceUUID)
+	return nil
+}
+
+func (o *gateway) patchGatewayAnnotationsDelete(key string, gw *gatewayv1.Gateway, retryNum ...int) error {
+	retry := 0
+	if len(retryNum) > 0 {
+		retry = retryNum[0]
+		if retry >= 3 {
+			return errors.New("patchGatewayAnnotationsDelete retried 3 times, aborting")
+		}
+	}
+
+	annotations := gw.Annotations
+	if annotations == nil {
+		utils.AviLog.Debugf("key: %s, msg: No annotations found for gateway %s/%s", key, gw.Namespace, gw.Name)
+		return nil
+	}
+
+	if _, exists := annotations[lib.GatewayVSAnnotation]; !exists {
+		utils.AviLog.Debugf("key: %s, msg: %s annotation not found for gateway %s/%s", key, lib.GatewayVSAnnotation, gw.Namespace, gw.Name)
+		return nil
+	}
+
+	// Remove the VS UUID annotation
+	delete(annotations, lib.GatewayVSAnnotation)
+
+	patchPayload := map[string]interface{}{
+		"metadata": map[string]map[string]string{
+			"annotations": annotations,
+		},
+	}
+
+	patchPayloadBytes, err := json.Marshal(patchPayload)
+	if err != nil {
+		return fmt.Errorf("error marshalling gateway annotation delete patch payload: %v", err)
+	}
+
+	_, err = akogatewayapilib.AKOControlConfig().GatewayAPIClientset().GatewayV1().Gateways(gw.Namespace).Patch(context.TODO(), gw.Name, types.MergePatchType, patchPayloadBytes, metav1.PatchOptions{})
+	if err != nil {
+		utils.AviLog.Warnf("key: %s, msg: error removing gateway annotations, retry: %d, err: %v", key, retry, err)
+		// Fetch updated gateway and retry
+		updatedGW, fetchErr := akogatewayapilib.AKOControlConfig().GatewayApiInformers().GatewayInformer.Lister().Gateways(gw.Namespace).Get(gw.Name)
+		if fetchErr != nil {
+			return fmt.Errorf("failed to fetch updated gateway: %v", fetchErr)
+		}
+		return o.patchGatewayAnnotationsDelete(key, updatedGW, retry+1)
+	}
+
+	utils.AviLog.Infof("key: %s, msg: Successfully removed gateway %s/%s VS UUID annotation", key, gw.Namespace, gw.Name)
+	return nil
 }

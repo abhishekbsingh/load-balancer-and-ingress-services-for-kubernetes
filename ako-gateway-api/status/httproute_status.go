@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 
@@ -65,7 +66,22 @@ func (o *httproute) GetAll(key string) map[string]*gatewayv1.HTTPRoute {
 }
 
 func (o *httproute) Delete(key string, option status.StatusOptions) {
-	// TODO: Add this code when we publish the status from the rest layer
+	nsName := strings.Split(option.Options.ServiceMetadata.HTTPRoute, "/")
+	if len(nsName) != 2 {
+		utils.AviLog.Warnf("key: %s, msg: invalid HttpRoute name and namespace", key)
+		return
+	}
+	namespace := nsName[0]
+	name := nsName[1]
+	httpRoute := o.Get(key, name, namespace)
+	if httpRoute != nil {
+		if option.Options.ServiceMetadata.HTTPRouteRuleName != "" {
+			// Remove specific backend entry
+			if err := o.patchHTTPRouteAnnotationsDelete(key, httpRoute, option.Options.ServiceMetadata.HTTPRouteRuleName, option.Options.ServiceMetadata.Gateway); err != nil {
+				utils.AviLog.Errorf("key: %s, msg: failed to remove HTTPRoute %s/%s annotations for rule %s: %v", key, namespace, name, option.Options.ServiceMetadata.HTTPRouteRuleName, err)
+			}
+		}
+	}
 }
 
 func (o *httproute) Update(key string, option status.StatusOptions) {
@@ -78,7 +94,15 @@ func (o *httproute) Update(key string, option status.StatusOptions) {
 	name := nsName[1]
 	httpRoute := o.Get(key, name, namespace)
 	if httpRoute != nil {
-		o.Patch(key, httpRoute, option.Options.Status)
+		if option.Options.Status != nil {
+			o.Patch(key, httpRoute, option.Options.Status)
+		}
+		// Update HTTPRoute annotations using patch
+		if option.Options.VirtualServiceUUID != "" && option.Options.ServiceMetadata.HTTPRouteRuleName != "" {
+			if err := o.patchHTTPRouteAnnotations(key, httpRoute, option.Options.ServiceMetadata.HTTPRouteRuleName, option.Options.ServiceMetadata.Gateway, option.Options.VirtualServiceUUID); err != nil {
+				utils.AviLog.Errorf("key: %s, msg: failed to update HTTPRoute annotations: %v", key, err)
+			}
+		}
 	}
 }
 
@@ -134,4 +158,108 @@ func (o *httproute) isStatusEqual(old, new *gatewayv1.HTTPRouteStatus) bool {
 		}
 	}
 	return reflect.DeepEqual(oldStatus, newStatus)
+}
+
+func (o *httproute) patchHTTPRouteAnnotations(key string, httpRoute *gatewayv1.HTTPRoute, ruleName, gatewayNSName, virtualServiceUUID string, retryNum ...int) error {
+	retry := 0
+	if len(retryNum) > 0 {
+		retry = retryNum[0]
+		if retry >= 3 {
+			return errors.New("patchHTTPRouteAnnotations retried 3 times, aborting")
+		}
+	}
+
+	annotations := httpRoute.Annotations
+	if annotations == nil {
+		annotations = make(map[string]string)
+	}
+
+	gatewayParts := strings.Split(gatewayNSName, "/")
+	if len(gatewayParts) != 2 {
+		return fmt.Errorf("invalid gateway namespace name: %s", gatewayNSName)
+	}
+
+	// Get existing VS UUID map or create new one
+	annotationKey := fmt.Sprintf(lib.HTTPRouteVSAnnotation, gatewayParts[0], gatewayParts[1], ruleName)
+	annotations[annotationKey] = virtualServiceUUID
+
+	patchPayload := map[string]interface{}{
+		"metadata": map[string]map[string]string{
+			"annotations": annotations,
+		},
+	}
+
+	patchPayloadBytes, err := json.Marshal(patchPayload)
+	if err != nil {
+		return fmt.Errorf("error marshalling HTTPRoute annotation patch payload: %v", err)
+	}
+
+	_, err = akogatewayapilib.AKOControlConfig().GatewayAPIClientset().GatewayV1().HTTPRoutes(httpRoute.Namespace).Patch(context.TODO(), httpRoute.Name, types.MergePatchType, patchPayloadBytes, metav1.PatchOptions{})
+	if err != nil {
+		utils.AviLog.Warnf("key: %s, msg: error updating HTTPRoute annotations, retry: %d, err: %v", key, retry, err)
+		// Fetch updated HTTPRoute and retry
+		updatedHTTPRoute, fetchErr := akogatewayapilib.AKOControlConfig().GatewayApiInformers().HTTPRouteInformer.Lister().HTTPRoutes(httpRoute.Namespace).Get(httpRoute.Name)
+		if fetchErr != nil {
+			return fmt.Errorf("failed to fetch updated HTTPRoute: %v", fetchErr)
+		}
+		return o.patchHTTPRouteAnnotations(key, updatedHTTPRoute, ruleName, gatewayNSName, virtualServiceUUID, retry+1)
+	}
+
+	utils.AviLog.Infof("key: %s, msg: Successfully updated HTTPRoute %s/%s annotations with VS UUID: %s", key, httpRoute.Namespace, httpRoute.Name, virtualServiceUUID)
+	return nil
+}
+
+func (o *httproute) patchHTTPRouteAnnotationsDelete(key string, httpRoute *gatewayv1.HTTPRoute, ruleName, gatewayNSName string, retryNum ...int) error {
+	retry := 0
+	if len(retryNum) > 0 {
+		retry = retryNum[0]
+		if retry >= 3 {
+			return errors.New("patchHTTPRouteAnnotationsDelete retried 3 times, aborting")
+		}
+	}
+
+	annotations := httpRoute.Annotations
+	if annotations == nil {
+		utils.AviLog.Debugf("key: %s, msg: No annotations found for HTTPRoute %s/%s", key, httpRoute.Namespace, httpRoute.Name)
+		return nil
+	}
+
+	gatewayParts := strings.Split(gatewayNSName, "/")
+	if len(gatewayParts) != 2 {
+		return fmt.Errorf("invalid gateway namespace name: %s", gatewayNSName)
+	}
+
+	annotationKey := fmt.Sprintf(lib.HTTPRouteVSAnnotation, gatewayParts[0], gatewayParts[1], ruleName)
+
+	_, exists := annotations[annotationKey]
+	if !exists {
+		utils.AviLog.Debugf("key: %s, msg: %s annotation not found for HTTPRoute %s/%s", key, annotationKey, httpRoute.Namespace, httpRoute.Name)
+		return nil
+	}
+	delete(annotations, annotationKey)
+
+	patchPayload := map[string]interface{}{
+		"metadata": map[string]map[string]string{
+			"annotations": annotations,
+		},
+	}
+
+	patchPayloadBytes, err := json.Marshal(patchPayload)
+	if err != nil {
+		return fmt.Errorf("error marshalling HTTPRoute annotation delete patch payload: %v", err)
+	}
+
+	_, err = akogatewayapilib.AKOControlConfig().GatewayAPIClientset().GatewayV1().HTTPRoutes(httpRoute.Namespace).Patch(context.TODO(), httpRoute.Name, types.MergePatchType, patchPayloadBytes, metav1.PatchOptions{})
+	if err != nil {
+		utils.AviLog.Warnf("key: %s, msg: error removing HTTPRoute annotations, retry: %d, err: %v", key, retry, err)
+		// Fetch updated HTTPRoute and retry
+		updatedHTTPRoute, fetchErr := akogatewayapilib.AKOControlConfig().GatewayApiInformers().HTTPRouteInformer.Lister().HTTPRoutes(httpRoute.Namespace).Get(httpRoute.Name)
+		if fetchErr != nil {
+			return fmt.Errorf("failed to fetch updated HTTPRoute: %v", fetchErr)
+		}
+		return o.patchHTTPRouteAnnotationsDelete(key, updatedHTTPRoute, ruleName, gatewayNSName, retry+1)
+	}
+
+	utils.AviLog.Infof("key: %s, msg: Successfully removed HTTPRoute %s/%s VS UUID annotation", key, httpRoute.Namespace, httpRoute.Name)
+	return nil
 }
